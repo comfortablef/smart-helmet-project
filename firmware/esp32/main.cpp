@@ -2,12 +2,13 @@
 #include <Wire.h>
 #include <Adafruit_ADXL345_U.h>
 #include <PulseSensorAmped.h>
+#include <NimBLEDevice.h>
 
 // === 1. 핀 정의 및 임계값 ===
 const int PIN_PPG       = A0;      // PPG 센서 아날로그 입력
 const int PIN_LED       = 26;      // 후미등 LED
 const int PIN_BUZZER    = 27;      // 피에조 스피커
-const int PPG_THRESHOLD = 550;     // PPG 감지 임계값 (테스트 후 조정)
+const int PPG_THRESHOLD = 550;     // PPG 감지 임계값
 
 // === 2. 센서 객체 및 상태 변수 ===
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified();
@@ -15,14 +16,24 @@ PulseSensorAmped          pulseSensor;
 bool                      collisionDetected = false;
 bool                      pulseDetected     = false;
 
+// === 3. BLE UUID / 객체 선언 ===
+#define SERVICE_UUID         "12345678-1234-1234-1234-1234567890ab"
+#define CHAR_UUID_HR         "12345678-1234-1234-1234-1234567890ac"
+#define CHAR_UUID_COLLISION  "12345678-1234-1234-1234-1234567890ad"
+
+NimBLEServer*         pServer        = nullptr;
+NimBLEService*        pService       = nullptr;
+NimBLECharacteristic* pCharHR        = nullptr;
+NimBLECharacteristic* pCharCollision = nullptr;
+
 void setup() {
   Serial.begin(115200);
 
-  // LED, Buzzer 핀 모드 설정
+  // --- LED / Buzzer 핀 모드 ---
   pinMode(PIN_LED,    OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
 
-  // I2C 초기화 및 ADXL345 초기화
+  // --- ADXL345 초기화 ---
   Wire.begin();
   if (!accel.begin()) {
     Serial.println("ADXL345 not detected!");
@@ -30,54 +41,67 @@ void setup() {
   }
   accel.setRange(ADXL345_RANGE_16_G);
 
-  // PPG 센서 초기화
+  // --- PPG 센서 초기화 ---
   pulseSensor.analogInput(PIN_PPG);
   if (!pulseSensor.begin()) {
     Serial.println("PPG sensor not detected!");
     while (1);
   }
+
+  // --- BLE 초기화 ---
+  NimBLEDevice::init("SmartHelmet");
+  pServer  = NimBLEDevice::createServer();
+  pService = pServer->createService(SERVICE_UUID);
+
+  pCharHR = pService->createCharacteristic(
+    CHAR_UUID_HR,
+    NIMBLE_PROPERTY::NOTIFY
+  );
+  pCharCollision = pService->createCharacteristic(
+    CHAR_UUID_COLLISION,
+    NIMBLE_PROPERTY::NOTIFY
+  );
+
+  pService->start();
+  NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+  pAdv->addServiceUUID(SERVICE_UUID);
+  pAdv->start();
+  Serial.println("BLE advertising started");
 }
 
 void loop() {
   readSensors();
-  processLogic();
   updateOutputs();
+  bleNotify();
   delay(50);
 }
 
-// === 3. 센서 읽기 ===
+// === 4. 센서 읽기 ===
 void readSensors() {
-  // 3-1. PPG 센서 샘플 읽기
+  // PPG
   int ppgValue = pulseSensor.getLatestSample();
   pulseDetected = (ppgValue > PPG_THRESHOLD);
 
-  // 3-2. ADXL345 가속도 읽기
+  // 충돌
   sensors_event_t event;
   accel.getEvent(&event);
   collisionDetected = (event.acceleration.z < -19.6f);
 
-  // 디버그용 시리얼 출력
+  // 디버그 시리얼
   Serial.print("PPG: ");
   Serial.print(ppgValue);
   Serial.print("  Collision: ");
   Serial.println(collisionDetected ? "YES" : "NO");
 }
 
-// === 4. 로직 처리 ===
-void processLogic() {
-  // 추가 알고리즘이나 필터링이 필요하면 여기에 구현
-}
-
-// === 5. 출력 업데이트 ===
+// === 5. 출력 제어 ===
 void updateOutputs() {
   if (collisionDetected) {
-    // 충돌 시: 풀 브라이트 + 부저음 + 시리얼 메시지
     digitalWrite(PIN_LED, HIGH);
     tone(PIN_BUZZER, 1000);
     Serial.println("Collision!");
   }
   else if (pulseDetected) {
-    // 심박 감지 시: 느린 깜빡임
     static unsigned long lastToggle = 0;
     if (millis() - lastToggle > 500) {
       digitalWrite(PIN_LED, !digitalRead(PIN_LED));
@@ -87,8 +111,26 @@ void updateOutputs() {
     noTone(PIN_BUZZER);
   }
   else {
-    // 평상 시: LED/부저 OFF
     digitalWrite(PIN_LED, LOW);
     noTone(PIN_BUZZER);
+  }
+}
+
+// === 6. BLE Notify ===
+void bleNotify() {
+  static bool lastPulse = false;
+  static bool lastCollision = false;
+
+  if (pulseDetected != lastPulse) {
+    lastPulse = pulseDetected;
+    uint8_t val = pulseDetected ? 1 : 0;
+    pCharHR->setValue(&val, 1);
+    pCharHR->notify();
+  }
+  if (collisionDetected != lastCollision) {
+    lastCollision = collisionDetected;
+    uint8_t val = collisionDetected ? 1 : 0;
+    pCharCollision->setValue(&val, 1);
+    pCharCollision->notify();
   }
 }
