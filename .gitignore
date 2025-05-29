@@ -1,0 +1,12 @@
+# Arduino 빌드 결과물 무시
+/build-*/
+/*.elf
+/*.hex
+/*.bin
+/.pio/
+/.vs/
+
+# 일반 무시
+*.exe
+*.o
+*.cpp.dep
